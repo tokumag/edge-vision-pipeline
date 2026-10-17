@@ -49,22 +49,24 @@ class MockEngine(BaseEngine):
         output[:, 3, 100] = 160.0 # h
         output[:, 4, 100] = 0.92  # class 0 confidence
 
-        # 2. Defect detection (class 2: structural_crack or class 1: surface_scratch)
-        # Check if the input tensor has high red channel intensity (defect signature)
+        # 2. Defect detection
         mean_r = float(np.mean(input_tensor[:, 0, :, :]))
-        if mean_r > 0.05:
+        if mean_r > 0.05 and self.num_classes > 1:
             output[:, 0, 250] = 340.0
             output[:, 1, 250] = 330.0
             output[:, 2, 250] = 70.0
             output[:, 3, 250] = 35.0
-            output[:, 6, 250] = 0.86 # class 2 (structural_crack)
+            defect_cls_1 = 4 + min(2, self.num_classes - 1)
+            output[:, defect_cls_1, 250] = 0.86
 
-            # Secondary minor scratch
-            output[:, 0, 400] = 260.0
-            output[:, 1, 400] = 290.0
-            output[:, 2, 400] = 40.0
-            output[:, 3, 400] = 20.0
-            output[:, 5, 400] = 0.74 # class 1 (surface_scratch)
+            # Secondary minor scratch if classes allow
+            if self.num_classes > 2:
+                output[:, 0, 400] = 260.0
+                output[:, 1, 400] = 290.0
+                output[:, 2, 400] = 40.0
+                output[:, 3, 400] = 20.0
+                defect_cls_2 = 4 + min(1, self.num_classes - 1)
+                output[:, defect_cls_2, 400] = 0.74
 
         return output
 
