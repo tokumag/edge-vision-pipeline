@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  edge-vision:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tokumag/edge-vision-pipeline:latest
+    container_name: edge-vision-inspector
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+    volumes:
+      - ./configs:/app/configs:ro
+      - ./weights:/app/weights:ro
+      - ./outputs:/app/outputs:rw
+    environment:
+      - PYTHONUNBUFFERED=1
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1024M
