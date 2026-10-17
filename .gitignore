@@ -1,0 +1,45 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Model checkpoints and weights
+weights/*.pt
+weights/*.onnx
+weights/*.engine
+weights/*.xml
+weights/*.bin
+!weights/.gitkeep
+
+# Output artifacts & media captures
+outputs/
+*.mp4
+*.avi
+*.jpg
+*.png
+!assets/*.jpg
+!assets/*.png
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment variables
+.env
+.env.local
+
+# Operating System files
+.DS_Store
+Thumbs.db

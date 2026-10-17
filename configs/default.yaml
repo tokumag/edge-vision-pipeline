@@ -1,0 +1,52 @@
+# Edge Computer Vision Pipeline Configuration
+pipeline:
+  name: "edge-vision-pipeline"
+  version: "1.0.0"
+  device: "cpu" # "cpu", "cuda", "vpu"
+
+stream:
+  source: 0 # Webcam index (0), video file path, or synthetic stream
+  input_resolution: [640, 640]
+  target_fps: 30
+  buffer_size: 4
+  drop_frames_on_lag: true
+
+model:
+  backend: "onnx" # "onnx", "pytorch", "mock"
+  model_path: "weights/yolov8n_defect.onnx"
+  input_size: [640, 640] # [height, width]
+  confidence_threshold: 0.45
+  iou_threshold: 0.50
+  num_threads: 4 # For ONNX Runtime CPU inference
+  providers:
+    - "CPUExecutionProvider"
+    # - "CUDAExecutionProvider"
+    # - "OpenVINOExecutionProvider"
+
+classes:
+  0: "normal_component"
+  1: "surface_scratch"
+  2: "structural_crack"
+  3: "dent_defect"
+  4: "misalignment"
+  5: "foreign_particle"
+
+benchmarking:
+  warmup_iterations: 15
+  test_iterations: 100
+  batch_size: 1
+  export_formats:
+    - "onnx"
+    - "openvino"
+
+visualization:
+  draw_fps: true
+  draw_latency: true
+  draw_box_confidence: true
+  color_map:
+    normal_component: [46, 204, 113] # Green
+    surface_scratch: [241, 196, 15] # Yellow
+    structural_crack: [231, 76, 60] # Red
+    dent_defect: [230, 126, 34] # Orange
+    misalignment: [155, 89, 182] # Purple
+    foreign_particle: [52, 152, 219] # Blue
