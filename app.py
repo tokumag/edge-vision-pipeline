@@ -1,21 +1,18 @@
 """
-Streamlit Web Dashboard for Real-Time Edge Computer Vision & Defect Detection.
-Run via: streamlit run app.py
+Edge Vision Pipeline — Dashboard
 """
 
 from __future__ import annotations
 
 import time
+import json
 import yaml
-from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 import numpy as np
 import pandas as pd
 import streamlit as st
-import plotly.express as px
 import plotly.graph_objects as go
-from PIL import Image
 
 from src.core.stream import SyntheticStream
 from src.core.preprocessor import LetterboxPreprocessor
@@ -26,26 +23,46 @@ from src.postprocess.visualizer import FrameVisualizer
 from src.benchmark.profiler import EdgeProfiler
 
 
-# --- Page Configuration ---
+# ---------------------------------------------------------------------------
+# Theme & layout
+# ---------------------------------------------------------------------------
+
 st.set_page_config(
-    page_title="Edge Vision Pipeline | Industrial Defect Inspector",
-    page_icon="⚡",
+    page_title="Edge Vision Pipeline",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# Custom Styling
+# Minimal CSS overrides — let Streamlit's native dark theme do most of the work.
 st.markdown(
     """
     <style>
-    .main { background-color: #0d1117; color: #c9d1d9; }
-    .stMetric { background-color: #161b22; padding: 12px; border-radius: 8px; border: 1px solid #30363d; }
-    .stButton>button { border-radius: 6px; font-weight: 600; }
+    /* tighter top padding */
+    .block-container { padding-top: 1.5rem; }
+
+    /* metric cards */
+    [data-testid="stMetric"] {
+        background: rgba(255,255,255,0.03);
+        border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 8px;
+        padding: 14px 16px;
+    }
+    [data-testid="stMetricValue"] { font-size: 1.6rem; }
+
+    /* hide the default Streamlit menu & footer for a cleaner look */
+    #MainMenu, footer { visibility: hidden; }
+
+    /* sidebar title */
+    [data-testid="stSidebar"] h1 { font-size: 1.15rem; letter-spacing: 0.03em; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 
 @st.cache_resource
 def load_config() -> Dict[str, Any]:
@@ -53,222 +70,300 @@ def load_config() -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def main() -> None:
-    config = load_config()
+# ---------------------------------------------------------------------------
+# Color palette — one palette, used everywhere
+# ---------------------------------------------------------------------------
 
-    st.sidebar.title("⚡ Edge Vision Pipeline")
-    st.sidebar.caption("High-Performance Industrial CV & Defect Detection")
+PALETTE = {
+    "normal_component": "#3b82f6",
+    "surface_scratch":  "#eab308",
+    "structural_crack": "#ef4444",
+    "dent_defect":      "#f97316",
+    "misalignment":     "#a855f7",
+    "foreign_particle": "#06b6d4",
+}
+
+SEVERITY = {
+    "normal_component": 0,
+    "surface_scratch":  1,
+    "structural_crack": 2,
+    "dent_defect":      1,
+    "misalignment":     1,
+    "foreign_particle": 1,
+}
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+
+def sidebar(config: Dict[str, Any]):
+    st.sidebar.markdown("# Edge Vision Pipeline")
+    st.sidebar.caption("v1.0.0")
     st.sidebar.markdown("---")
 
-    mode = st.sidebar.radio(
-        "Operation Mode",
-        ["🔍 Real-Time Inspection", "📊 Edge Benchmarking", "⚙️ Model Architecture"],
+    page = st.sidebar.radio(
+        "Page",
+        ["Inspect", "Benchmark"],
+        label_visibility="collapsed",
     )
 
-    if mode == "🔍 Real-Time Inspection":
-        render_inspection_view(config)
-    elif mode == "📊 Edge Benchmarking":
-        render_benchmarking_view(config)
-    else:
-        render_architecture_view(config)
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("##### Detection")
+    conf = st.sidebar.slider("Confidence", 0.20, 0.90, 0.45, 0.05, format="%.2f")
+    iou = st.sidebar.slider("NMS IoU", 0.20, 0.90, 0.50, 0.05, format="%.2f")
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("##### Pipeline")
+    st.sidebar.code(
+        f"Backend   {config['model']['backend']}\n"
+        f"Input     {config['model']['input_size'][0]}x{config['model']['input_size'][1]}\n"
+        f"Classes   {len(config.get('classes', {}))}",
+        language=None,
+    )
+
+    return page, conf, iou
 
 
-def render_inspection_view(config: Dict[str, Any]) -> None:
-    st.title("🔍 Industrial Defect & Component Inspector")
-    st.markdown("Real-time automated optical inspection (AOI) pipeline running on edge hardware.")
+# ---------------------------------------------------------------------------
+# Page: Inspect
+# ---------------------------------------------------------------------------
 
-    col_ctrl1, col_ctrl2, col_ctrl3 = st.columns(3)
-    with col_ctrl1:
-        conf_thresh = st.slider("Confidence Threshold", 0.1, 0.95, 0.45, 0.05)
-    with col_ctrl2:
-        iou_thresh = st.slider("NMS IoU Threshold", 0.1, 0.95, 0.50, 0.05)
-    with col_ctrl3:
-        run_mode = st.selectbox("Inspection Stream Source", ["Synthetic Industrial Conveyor", "Static Sample Frame"])
+def page_inspect(config: Dict[str, Any], conf: float, iou: float) -> None:
+    st.markdown("## Live Inspection")
 
-    st.markdown("---")
+    # --- controls row ---
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        n_frames = st.number_input("Frames", min_value=5, max_value=200, value=30, step=5)
+    with c2:
+        st.markdown("")  # vertical spacer
+        run = st.button("Run", type="primary", use_container_width=True)
+    with c3:
+        pass  # breathing room
 
-    # Metrics row
-    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-    metric_fps = metric_col1.empty()
-    metric_lat = metric_col2.empty()
-    metric_det = metric_col3.empty()
-    metric_def = metric_col4.empty()
+    # --- metrics ---
+    m1, m2, m3, m4 = st.columns(4)
+    slot_fps = m1.empty()
+    slot_lat = m2.empty()
+    slot_det = m3.empty()
+    slot_trk = m4.empty()
 
-    # Image and Chart Layout
-    stream_col, stats_col = st.columns([1.6, 1.0])
-    frame_placeholder = stream_col.empty()
-    chart_placeholder = stats_col.empty()
+    # --- main canvas ---
+    left, right = st.columns([5, 3])
+    slot_frame = left.empty()
+    slot_chart = right.empty()
 
-    # Initialize pipeline
-    preprocessor = LetterboxPreprocessor(target_size=tuple(config["model"]["input_size"]))
+    # --- detection log ---
+    slot_log = st.empty()
+
+    if not run:
+        slot_frame.info("Press **Run** to start the inspection loop.")
+        return
+
+    # Build pipeline
+    target = tuple(config["model"]["input_size"])
+    preprocessor = LetterboxPreprocessor(target_size=target)
     engine = create_engine(config["model"], force_mock=True)
     decoder = YOLOOutputDecoder(
-        conf_threshold=conf_thresh,
-        iou_threshold=iou_thresh,
+        conf_threshold=conf,
+        iou_threshold=iou,
         class_names=config.get("classes", {}),
     )
     tracker = EdgeTracker()
     visualizer = FrameVisualizer()
     stream = SyntheticStream(resolution=(640, 640))
 
-    if st.button("▶️ Run Inspection Loop (20 Frames)", type="primary"):
-        defect_counts: Dict[str, int] = {}
+    class_accum: Dict[str, int] = {}
+    latencies = []
+    log_rows = []
 
-        for i in range(20):
-            t0 = time.perf_counter()
-            frame = stream.generate_frame()
+    for i in range(int(n_frames)):
+        t0 = time.perf_counter()
+        frame = stream.generate_frame()
 
-            tensor, meta = preprocessor.preprocess(frame)
-            raw_output = engine.infer(tensor)
-            detections = decoder.decode(raw_output, meta)
-            detections = tracker.update(detections)
+        tensor, meta = preprocessor.preprocess(frame)
+        raw = engine.infer(tensor)
+        dets = decoder.decode(raw, meta)
+        dets = tracker.update(dets)
 
-            latency_ms = (time.perf_counter() - t0) * 1000.0
-            fps = 1000.0 / max(latency_ms, 1e-4)
+        lat = (time.perf_counter() - t0) * 1000.0
+        latencies.append(lat)
+        fps = 1000.0 / max(lat, 0.01)
 
-            # Count defect classes
-            for d in detections:
-                cname = d.get("class_name", "unknown")
-                defect_counts[cname] = defect_counts.get(cname, 0) + 1
+        for d in dets:
+            cn = d.get("class_name", "unknown")
+            class_accum[cn] = class_accum.get(cn, 0) + 1
 
-            annotated = visualizer.render(
-                frame, detections, fps=fps, latency_ms=latency_ms, backend=engine.backend_name
+        annotated = visualizer.render(
+            frame, dets, fps=fps, latency_ms=lat, backend=engine.backend_name,
+        )
+
+        # --- update UI ---
+        slot_fps.metric("FPS", f"{fps:.0f}")
+        slot_lat.metric("Latency", f"{lat:.1f} ms")
+        slot_det.metric("Detections", len(dets))
+        slot_trk.metric("Tracks", tracker.next_track_id - 1)
+
+        frame_rgb = annotated[:, :, ::-1]
+        slot_frame.image(frame_rgb, use_container_width=True)
+
+        # cumulative class bar
+        if class_accum:
+            names = list(class_accum.keys())
+            counts = [class_accum[n] for n in names]
+            colors = [PALETTE.get(n, "#888") for n in names]
+
+            fig = go.Figure(go.Bar(
+                y=[n.replace("_", " ") for n in names],
+                x=counts,
+                orientation="h",
+                marker_color=colors,
+                text=counts,
+                textposition="outside",
+            ))
+            fig.update_layout(
+                height=260,
+                margin=dict(l=0, r=20, t=10, b=10),
+                xaxis_title="Count",
+                yaxis=dict(autorange="reversed"),
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#c9d1d9"),
             )
+            slot_chart.plotly_chart(fig, use_container_width=True, key=f"bar_{i}")
 
-            # Update Metrics
-            metric_fps.metric("Inference FPS", f"{fps:.1f}", delta=f"{fps - 30:.1f} vs 30fps")
-            metric_lat.metric("Latency", f"{latency_ms:.1f} ms", delta="-12% vs PyTorch")
-            metric_det.metric("Active Detections", f"{len(detections)}")
-            defect_total = sum(v for k, v in defect_counts.items() if k != "normal_component")
-            metric_def.metric("Defects Flagged", f"{defect_total}", delta="Action Required" if defect_total > 0 else "Normal")
+        # collect log
+        for d in dets:
+            sev = SEVERITY.get(d["class_name"], 0)
+            if sev > 0:
+                log_rows.append({
+                    "frame": i + 1,
+                    "class": d["class_name"].replace("_", " "),
+                    "confidence": f"{d['confidence']:.0%}",
+                    "track": d.get("track_id", "—"),
+                })
 
-            # Render Frame
-            frame_rgb = annotated[:, :, ::-1] # BGR to RGB for Streamlit
-            frame_placeholder.image(frame_rgb, caption=f"Inspection Frame {i+1}/20", use_container_width=True)
+        time.sleep(0.02)
 
-            # Render Defect Distribution Chart
-            if defect_counts:
-                df_counts = pd.DataFrame(list(defect_counts.items()), columns=["Category", "Count"])
-                fig = px.bar(
-                    df_counts,
-                    x="Count",
-                    y="Category",
-                    orientation="h",
-                    title="Real-Time Defect Breakdown",
-                    color="Category",
-                    color_discrete_map={
-                        "normal_component": "#2ecc71",
-                        "structural_crack": "#e74c3c",
-                        "surface_scratch": "#f1c40f",
-                    },
-                )
-                fig.update_layout(height=350, margin=dict(l=10, r=10, t=40, b=20), plot_bgcolor="rgba(0,0,0,0)")
-                chart_placeholder.plotly_chart(fig, use_container_width=True)
+    # --- summary after loop ---
+    st.markdown("---")
 
-            time.sleep(0.04)
+    avg_lat = np.mean(latencies)
+    avg_fps = 1000.0 / max(avg_lat, 0.01)
 
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Avg Latency", f"{avg_lat:.1f} ms")
+    r2.metric("Avg FPS", f"{avg_fps:.0f}")
+    r3.metric("Total Frames", int(n_frames))
 
-def render_benchmarking_view(config: Dict[str, Any]) -> None:
-    st.title("📊 Edge Hardware Benchmarks & Profiling")
-    st.markdown("Precision tail latency (p50, p95, p99) and FPS throughput analysis across edge execution runtimes.")
-
-    bench_col1, bench_col2 = st.columns([1, 1])
-
-    with bench_col1:
-        st.subheader("Benchmark Execution")
-        iterations = st.slider("Iterations", 20, 200, 50, 10)
-        warmup = st.slider("Warmup Passes", 5, 30, 10, 5)
-
-        if st.button("🚀 Run Hardware Benchmark", type="primary"):
-            with st.spinner("Benchmarking edge engine..."):
-                engine = create_engine(config["model"], force_mock=True)
-                profiler = EdgeProfiler(
-                    engine=engine,
-                    warmup_runs=warmup,
-                    test_runs=iterations,
-                    input_shape=(1, 3, 640, 640),
-                )
-                res = profiler.run_benchmark()
-
-                st.success("Benchmark completed!")
-
-                # Latency Gauge
-                p50 = res["latency"]["p50_ms"]
-                fig_gauge = go.Figure(
-                    go.Indicator(
-                        mode="gauge+number",
-                        value=p50,
-                        title={"text": "Median Latency (ms)"},
-                        gauge={
-                            "axis": {"range": [0, 50]},
-                            "bar": {"color": "#2ecc71" if p50 < 20 else "#e74c3c"},
-                            "steps": [
-                                {"range": [0, 20], "color": "#1b4d3e"},
-                                {"range": [20, 35], "color": "#4a3c1b"},
-                                {"range": [35, 50], "color": "#4d1b1b"},
-                            ],
-                            "threshold": {"line": {"color": "red", "width": 4}, "thickness": 0.75, "value": 33.3},
-                        },
-                    )
-                )
-                fig_gauge.update_layout(height=260, margin=dict(l=20, r=20, t=30, b=10))
-                st.plotly_chart(fig_gauge, use_container_width=True)
-
-    with bench_col2:
-        st.subheader("Cross-Runtime Comparison")
-        # Comparative benchmark table
-        bench_data = pd.DataFrame(
-            [
-                {"Runtime": "PyTorch (FP32 CPU)", "Latency (p50)": "48.2 ms", "FPS": "20.7", "Memory": "184 MB", "Status": "Baseline"},
-                {"Runtime": "ONNX Runtime (CPU)", "Latency (p50)": "14.6 ms", "FPS": "68.5", "Memory": "42 MB", "Status": "3.3x Faster"},
-                {"Runtime": "OpenVINO (FP16)", "Latency (p50)": "9.8 ms", "FPS": "102.0", "Memory": "38 MB", "Status": "4.9x Faster"},
-                {"Runtime": "ONNX (INT8 Quantized)", "Latency (p50)": "7.2 ms", "FPS": "138.8", "Memory": "29 MB", "Status": "6.7x Faster"},
-            ]
+    if log_rows:
+        st.markdown("#### Defect Log")
+        st.dataframe(
+            pd.DataFrame(log_rows),
+            use_container_width=True,
+            hide_index=True,
         )
-        st.dataframe(bench_data, use_container_width=True, hide_index=True)
-
-        # Plotly comparison
-        fig_bar = px.bar(
-            bench_data,
-            x="Runtime",
-            y=[20.7, 68.5, 102.0, 138.8],
-            title="Throughput (FPS) by Edge Runtime",
-            labels={"y": "Frames Per Second (FPS)"},
-            color="Runtime",
-        )
-        fig_bar.update_layout(height=300, showlegend=False, margin=dict(l=10, r=10, t=40, b=20))
-        st.plotly_chart(fig_bar, use_container_width=True)
+    else:
+        st.success("No defects detected in this run.")
 
 
-def render_architecture_view(config: Dict[str, Any]) -> None:
-    st.title("⚙️ Edge Vision Pipeline Architecture")
-    st.markdown("Designed for sub-15ms edge inference with thread-safe capture, zero-copy tensor buffers, and vectorized NMS.")
+# ---------------------------------------------------------------------------
+# Page: Benchmark
+# ---------------------------------------------------------------------------
 
-    st.code(
-        """
-+------------------+      +-------------------+      +--------------------+
-|  Video Source    | ---> | Threaded Capture  | ---> | Letterbox Pad &    |
-| (Webcam/File/AOI)|      | Circular Buffer   |      | Normalize (0-1.0)  |
-+------------------+      +-------------------+      +--------------------+
-                                                               |
-                                                               v
-+------------------+      +-------------------+      +--------------------+
-| Telemetry Overlay| <--- | Centroid & IoU    | <--- | ONNX Runtime Engine|
-| & Defect Alert   |      | Object Tracker    |      | Vectorized NMS     |
-+------------------+      +-------------------+      +--------------------+
-        """,
-        language="text",
+def page_benchmark(config: Dict[str, Any]) -> None:
+    st.markdown("## Inference Benchmark")
+    st.caption("Measures actual latency percentiles and throughput on this machine.")
+
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        runs = st.number_input("Iterations", 20, 500, 50, 10)
+    with c2:
+        warmup = st.number_input("Warmup", 5, 50, 10, 5)
+    with c3:
+        st.markdown("")
+        go_btn = st.button("Run benchmark", type="primary", use_container_width=True)
+
+    if not go_btn:
+        st.divider()
+        st.info("Configure iterations and warmup, then press **Run benchmark**.")
+        return
+
+    engine = create_engine(config["model"], force_mock=True)
+    target = tuple(config["model"]["input_size"])
+    profiler = EdgeProfiler(
+        engine=engine,
+        warmup_runs=int(warmup),
+        test_runs=int(runs),
+        input_shape=(1, 3, target[0], target[1]),
     )
 
-    st.markdown(
-        """
-    ### Key Engineering Design Decisions:
-    1. **Asynchronous Frame Streaming**: Capture and inference run on separate threads, preventing queue starvation.
-    2. **Vectorized Non-Maximum Suppression**: Pure NumPy multi-class NMS without requiring PyTorch on edge devices.
-    3. **Resolution Agnostic Inversion**: Letterbox preprocessor tracks exact padding offsets for sub-pixel bbox reconstruction.
-    4. **Centroid Tracking Persistence**: Detections are assigned persistent tracking IDs across conveyor belt movements.
-    """
+    with st.spinner("Running..."):
+        res = profiler.run_benchmark()
+
+    st.divider()
+
+    # --- headline metrics ---
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Throughput", f"{res['throughput_fps']:.1f} FPS")
+    m2.metric("Median (p50)", f"{res['latency']['p50_ms']:.2f} ms")
+    m3.metric("p95 Latency", f"{res['latency']['p95_ms']:.2f} ms")
+    m4.metric("Memory RSS", f"{res['memory']['rss_mb']:.0f} MB")
+
+    # --- latency distribution chart ---
+    lat = res["latency"]
+    percentiles = ["min", "p50", "p90", "p95", "p99", "max"]
+    values = [lat["min_ms"], lat["p50_ms"], lat["p90_ms"], lat["p95_ms"], lat["p99_ms"], lat["max_ms"]]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=percentiles,
+        y=values,
+        mode="lines+markers",
+        line=dict(color="#3b82f6", width=2),
+        marker=dict(size=8),
+        fill="tozeroy",
+        fillcolor="rgba(59,130,246,0.08)",
+    ))
+
+    # real-time target line
+    fig.add_hline(
+        y=33.3, line_dash="dot", line_color="#ef4444",
+        annotation_text="30 FPS threshold (33.3 ms)",
+        annotation_position="top left",
+        annotation_font_color="#ef4444",
     )
+
+    fig.update_layout(
+        title="Latency Distribution",
+        yaxis_title="Latency (ms)",
+        xaxis_title="Percentile",
+        height=340,
+        margin=dict(l=10, r=10, t=40, b=40),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#c9d1d9"),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --- raw results ---
+    with st.expander("Raw benchmark data"):
+        st.json(res)
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    config = load_config()
+    page, conf, iou = sidebar(config)
+
+    if page == "Inspect":
+        page_inspect(config, conf, iou)
+    else:
+        page_benchmark(config)
 
 
 if __name__ == "__main__":
