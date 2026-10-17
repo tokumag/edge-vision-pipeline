@@ -12,16 +12,12 @@ import json
 import time
 import yaml
 from pathlib import Path
-import numpy as np
+from typing import Dict, Any
 
-from src.core.stream import VideoStream, SyntheticStream
-from src.core.preprocessor import LetterboxPreprocessor
-from src.inference.factory import create_engine
-from src.postprocess.nms import YOLOOutputDecoder
-from src.postprocess.tracker import EdgeTracker
-from src.postprocess.visualizer import FrameVisualizer
+from src.core.stream import SyntheticStream
+from src.pipeline import DetectionPipeline
 from src.benchmark.profiler import EdgeProfiler
-
+from src.inference.factory import create_engine
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -30,7 +26,7 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 
-def load_config(path: str = "configs/default.yaml") -> dict:
+def load_config(path: str = "configs/default.yaml") -> Dict[str, Any]:
     """Safely load YAML configuration."""
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -39,75 +35,58 @@ def load_config(path: str = "configs/default.yaml") -> dict:
 def cmd_detect(args: argparse.Namespace) -> None:
     """Run real-time edge defect detection on camera, file, or synthetic stream."""
     config = load_config(args.config)
+    if args.conf is not None:
+        config["model"]["confidence_threshold"] = args.conf
+
+    pipeline = DetectionPipeline(config=config, force_mock=args.mock)
+    stream = SyntheticStream(resolution=(640, 640))
+
     print("\n" + "=" * 60)
     print("  [*] EDGE VISION PIPELINE - REAL-TIME INFERENCE")
     print("=" * 60)
-
-    # Initialize components
-    target_size = tuple(config["model"]["input_size"])
-    preprocessor = LetterboxPreprocessor(target_size=target_size)
-    engine = create_engine(config["model"], force_mock=args.mock)
-    decoder = YOLOOutputDecoder(
-        conf_threshold=args.conf or config["model"]["confidence_threshold"],
-        iou_threshold=config["model"]["iou_threshold"],
-        class_names=config.get("classes", {}),
-    )
-    tracker = EdgeTracker()
-    visualizer = FrameVisualizer()
-
-    print(f"Backend:         {engine.backend_name.upper()}")
-    print(f"Input size:      {target_size}")
-    print(f"Conf threshold:  {decoder.conf_threshold}")
+    print(f"Backend:         {pipeline.engine.backend_name.upper()}")
+    print(f"Input size:      {config['model']['input_size']}")
+    print(f"Conf threshold:  {config['model']['confidence_threshold']}")
     print(f"Frames to run:   {args.frames}")
     print("-" * 60)
 
-    stream = SyntheticStream(resolution=(640, 640))
-    total_detections = 0
     start_time = time.perf_counter()
 
     for idx in range(args.frames):
         frame = stream.generate_frame()
-        t0 = time.perf_counter()
-
-        # 1. Preprocess
-        tensor, meta = preprocessor.preprocess(frame)
-
-        # 2. Infer
-        raw_output = engine.infer(tensor)
-
-        # 3. Postprocess & Track
-        detections = decoder.decode(raw_output, meta)
-        detections = tracker.update(detections)
-
-        latency_ms = (time.perf_counter() - t0) * 1000.0
-        fps = 1000.0 / max(latency_ms, 1e-4)
-
-        # 4. Visualize
-        annotated = visualizer.render(
-            frame, detections, fps=fps, latency_ms=latency_ms, backend=engine.backend_name
-        )
-        total_detections += len(detections)
+        res = pipeline.process_frame(frame)
 
         if (idx + 1) % 10 == 0 or idx == args.frames - 1:
-            print(f"  Frame [{idx + 1:3d}/{args.frames}] | Latency: {latency_ms:5.1f}ms | FPS: {fps:4.1f} | Detections: {len(detections)}")
+            print(
+                f"  Frame [{idx + 1:3d}/{args.frames}] | "
+                f"Latency: {res.latency_ms:5.1f}ms | "
+                f"FPS: {res.fps:4.1f} | "
+                f"Detections: {len(res.detections)}"
+            )
 
     elapsed = time.perf_counter() - start_time
-    avg_fps = args.frames / max(elapsed, 1e-4)
+    summary = pipeline.get_summary_metrics()
+
     print("-" * 60)
-    print(f"[OK] Pipeline run complete in {elapsed:.2f}s (Avg {avg_fps:.1f} FPS)")
-    print(f"[OK] Total defect/component instances tracked: {tracker.next_track_id - 1}")
+    print(f"[OK] Pipeline run complete in {elapsed:.2f}s (Avg {summary['avg_fps']} FPS)")
+    print(f"[OK] Median latency: {summary['p50_latency_ms']} ms | p95: {summary['p95_latency_ms']} ms")
+    print(f"[OK] Total detections: {summary['total_detections']} | Defect frame rate: {summary['defect_rate']:.1%}")
     print("=" * 60 + "\n")
 
 
 def cmd_benchmark(args: argparse.Namespace) -> None:
     """Execute high-precision hardware inference profiler."""
     config = load_config(args.config)
+    engine = create_engine(config["model"], force_mock=args.mock)
+    target_size = tuple(config["model"]["input_size"])
+
     print("\n" + "=" * 60)
     print("  [*] EDGE HARDWARE BENCHMARK & LATENCY PROFILER")
     print("=" * 60)
-
-    engine = create_engine(config["model"], force_mock=args.mock)
-    target_size = tuple(config["model"]["input_size"])
+    print(f"Backend:     {engine.backend_name.upper()}")
+    print(f"Resolution:  {target_size}")
+    print(f"Iterations:  {args.runs} (warmup: {args.warmup})")
+    print("\nExecuting profiling passes...")
 
     profiler = EdgeProfiler(
         engine=engine,
@@ -115,12 +94,6 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
         test_runs=args.runs,
         input_shape=(1, 3, target_size[0], target_size[1]),
     )
-
-    print(f"Backend:     {engine.backend_name.upper()}")
-    print(f"Resolution:  {target_size}")
-    print(f"Iterations:  {args.runs} (warmup: {args.warmup})")
-    print("\nExecuting profiling passes...")
-
     results = profiler.run_benchmark()
 
     print("\n" + "-" * 40)

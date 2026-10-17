@@ -4,8 +4,11 @@ High-performance image preprocessor for YOLO and ONNX edge models.
 
 from __future__ import annotations
 
+import logging
 from typing import Tuple, Dict, Any
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 try:
     import cv2

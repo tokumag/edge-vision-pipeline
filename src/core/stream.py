@@ -4,10 +4,13 @@ Threaded video stream and synthetic frame generator for edge pipelines.
 
 from __future__ import annotations
 
+import logging
 import time
 import threading
 from typing import Generator, Tuple, Optional, Union
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 try:
     import cv2
