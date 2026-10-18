@@ -1,12 +1,12 @@
 """
-Unified edge detection pipeline orchestrating preprocessing, inference, tracking, and visualization.
+Unified edge detection pipeline orchestrating preprocessing, inference, tracking, visualization, and defect heatmaps.
 """
 
 from __future__ import annotations
 
 import time
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Tuple
 import numpy as np
 
@@ -16,6 +16,7 @@ from src.inference.base import BaseEngine
 from src.postprocess.nms import YOLOOutputDecoder
 from src.postprocess.tracker import EdgeTracker
 from src.postprocess.visualizer import FrameVisualizer
+from src.postprocess.heatmap import DefectHeatmap
 from src.metrics import MetricsCollector
 
 logger = logging.getLogger(__name__)
@@ -30,13 +31,14 @@ class PipelineResult:
     latency_ms: float
     fps: float
     metadata: Dict[str, Any]
+    hotspots: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class DetectionPipeline:
     """
     Production-grade end-to-end edge computer vision pipeline.
     Encapsulates preprocessing, deep learning inference, NMS suppression,
-    persistent tracking, and visual annotation into a unified API.
+    persistent tracking, spatial defect heatmaps, and visual annotation.
     """
 
     def __init__(
@@ -46,9 +48,9 @@ class DetectionPipeline:
     ) -> None:
         self.config = config
         model_cfg = config.get("model", {})
-        target_size = tuple(model_cfg.get("input_size", [640, 640]))
+        self.target_size = tuple(model_cfg.get("input_size", [640, 640]))
 
-        self.preprocessor = LetterboxPreprocessor(target_size=target_size)
+        self.preprocessor = LetterboxPreprocessor(target_size=self.target_size)
         self.engine: BaseEngine = create_engine(model_cfg, force_mock=force_mock)
         self.decoder = YOLOOutputDecoder(
             conf_threshold=model_cfg.get("confidence_threshold", 0.45),
@@ -57,20 +59,24 @@ class DetectionPipeline:
         )
         self.tracker = EdgeTracker()
         self.visualizer = FrameVisualizer()
+        self.heatmap = DefectHeatmap(resolution=self.target_size)
         self.metrics = MetricsCollector()
 
         logger.info(
             "Initialized DetectionPipeline with backend=%s, input_size=%s",
             self.engine.backend_name,
-            target_size,
+            self.target_size,
         )
 
-    def process_frame(self, frame: np.ndarray) -> PipelineResult:
+    def process_frame(
+        self, frame: np.ndarray, apply_heatmap: bool = False
+    ) -> PipelineResult:
         """
         Execute full inference pipeline on a single frame.
 
         Args:
             frame: Input image array [H, W, 3] in BGR format.
+            apply_heatmap: Whether to blend spatial defect density onto output frame.
 
         Returns:
             PipelineResult containing detections, annotated frame, and timing diagnostics.
@@ -89,11 +95,15 @@ class DetectionPipeline:
         # 4. Association & Persistent Tracking
         detections = self.tracker.update(detections)
 
+        # 5. Spatial Defect Density Accumulation
+        self.heatmap.update(detections)
+        hotspots = self.heatmap.get_top_hotspots(k=3)
+
         # Latency calculation
         latency_ms = (time.perf_counter() - t0) * 1000.0
         fps = 1000.0 / max(latency_ms, 1e-4)
 
-        # 5. Visual Rendering
+        # 6. Visual Rendering
         annotated = self.visualizer.render(
             frame=frame,
             detections=detections,
@@ -102,7 +112,10 @@ class DetectionPipeline:
             backend=self.engine.backend_name,
         )
 
-        # 6. Record Telemetry
+        if apply_heatmap:
+            annotated = self.heatmap.render_overlay(annotated, alpha=0.40)
+
+        # 7. Record Telemetry
         class_counts: Dict[str, int] = {}
         for d in detections:
             cname = d.get("class_name", "unknown")
@@ -121,11 +134,20 @@ class DetectionPipeline:
             latency_ms=round(latency_ms, 2),
             fps=round(fps, 1),
             metadata=meta,
+            hotspots=hotspots,
         )
 
-    def reset_tracker(self) -> None:
-        """Reset object tracker state and track IDs."""
+    def get_heatmap_frame(self, base_frame: Optional[np.ndarray] = None) -> np.ndarray:
+        """Render standalone thermal heatmap overlay."""
+        if base_frame is None:
+            base_frame = np.full((self.target_size[1], self.target_size[0], 3), 40, dtype=np.uint8)
+        return self.heatmap.render_overlay(base_frame, alpha=0.60)
+
+    def reset_state(self) -> None:
+        """Reset tracker, heatmap, and telemetry metrics."""
         self.tracker = EdgeTracker()
+        self.heatmap.reset()
+        self.metrics.reset()
 
     def get_summary_metrics(self) -> Dict[str, Any]:
         """Fetch statistical rollup from metrics collector."""

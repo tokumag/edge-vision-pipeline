@@ -3,9 +3,9 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![ONNX Runtime](https://img.shields.io/badge/runtime-ONNX--Runtime-purple.svg)](https://onnxruntime.ai/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-18%2F18%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-24%2F24%20passing-brightgreen.svg)](tests/)
 
-An end-to-end computer vision and industrial defect detection pipeline optimized for low-latency edge deployment. Built with **ONNX Runtime**, **vectorized multi-class NMS**, **centroid/IoU tracking**, and a **clean Streamlit monitoring interface**.
+An end-to-end computer vision and industrial defect detection pipeline optimized for low-latency edge deployment. Built with **ONNX Runtime**, **vectorized multi-class NMS**, **centroid/IoU tracking**, **spatial defect density heatmaps**, and a **clean Streamlit monitoring interface**.
 
 ---
 
@@ -29,6 +29,8 @@ An end-to-end computer vision and industrial defect detection pipeline optimized
 - **Decoupled Frame Capture**: Background threading prevents video source buffering and eliminates latency queuing on high-speed feeds.
 - **Aspect-Ratio Preserving Letterboxing**: Tracks sub-pixel coordinate scaling so predicted bounding boxes map accurately back to original image dimensions.
 - **Vectorized NMS**: Multi-class Non-Maximum Suppression implemented purely in NumPy for maximum edge throughput without PyTorch overhead.
+- **Spatial Defect Density Heatmap**: Gaussian accumulation identifying localized recurrent failure hotspots across conveyor belts and manufacturing dies.
+- **Media Upload & Live Inspection**: Inspect live video streams or upload custom images (.jpg, .png) for immediate optical inspection and hot-zone analysis.
 - **Hardware Telemetry Profiler**: Precision edge benchmarking measuring tail latencies ($p_{50}, p_{90}, p_{95}, p_{99}$), memory RSS, and throughput (FPS).
 
 ---
@@ -54,7 +56,7 @@ pip install -e .
 ```bash
 streamlit run app.py
 ```
-Open [http://localhost:8501](http://localhost:8501) to interact with the live inspection loop and benchmark profiler.
+Open [http://localhost:8501](http://localhost:8501) to interact with the live inspection loop, upload images, inspect defect heatmaps, and run the hardware profiler.
 
 ### 3. CLI Commands
 
@@ -73,13 +75,19 @@ python -m src.cli export --model weights/yolov8n.pt --format onnx
 
 ## Automated Test Suite
 
-The test suite covers streaming, letterbox preprocessing, inference backends, vectorized NMS, tracking persistence, hardware profiling, and telemetry collection:
+The test suite covers streaming, letterbox preprocessing, inference backends, vectorized NMS, tracking persistence, spatial defect heatmaps, hardware profiling, and telemetry collection:
 
 ```bash
 pytest tests/ -v
 ```
 
 ```text
+tests/test_heatmap.py::TestDefectHeatmap::test_heatmap_initialization PASSED
+tests/test_heatmap.py::TestDefectHeatmap::test_heatmap_accumulation_ignores_normal PASSED
+tests/test_heatmap.py::TestDefectHeatmap::test_heatmap_accumulation_defect PASSED
+tests/test_heatmap.py::TestDefectHeatmap::test_heatmap_hotspots_identification PASSED
+tests/test_heatmap.py::TestDefectHeatmap::test_render_overlay_preserves_shape PASSED
+tests/test_heatmap.py::TestDefectHeatmap::test_reset_clears_density PASSED
 tests/test_pipeline.py::TestStream::test_synthetic_stream_shape PASSED
 tests/test_pipeline.py::TestStream::test_stream_generator_count PASSED
 tests/test_pipeline.py::TestStream::test_synthetic_stream_deterministic PASSED
@@ -99,7 +107,7 @@ tests/test_pipeline.py::TestProfiler::test_benchmark_run PASSED
 tests/test_pipeline.py::TestPipelineAndMetrics::test_detection_pipeline_end_to_end PASSED
 tests/test_pipeline.py::TestPipelineAndMetrics::test_metrics_collector PASSED
 
-============================= 18 passed in 0.36s =============================
+============================= 24 passed in 2.55s =============================
 ```
 
 ---
@@ -108,7 +116,7 @@ tests/test_pipeline.py::TestPipelineAndMetrics::test_metrics_collector PASSED
 
 ```text
 edge-vision-pipeline/
-|-- app.py                     # Streamlit live inspection & benchmark dashboard
+|-- app.py                     # Streamlit live inspection, media upload & benchmark dashboard
 |-- pyproject.toml             # PEP 621 package metadata & configuration
 |-- Dockerfile                 # Containerized edge deployment
 |-- docker-compose.yml         # Container service configuration
@@ -130,11 +138,13 @@ edge-vision-pipeline/
 |   |-- postprocess/
 |   |   |-- nms.py             # Vectorized multi-class Non-Maximum Suppression
 |   |   |-- tracker.py         # Centroid & IoU persistent defect tracker
+|   |   |-- heatmap.py         # Spatial defect density & Gaussian thermal accumulator
 |   |   `-- visualizer.py      # HUD telemetry overlay & bounding box renderer
 |   `-- benchmark/
 |       `-- profiler.py        # Latency percentiles (p50-p99) & memory profiler
 |-- tests/
-|   `-- test_pipeline.py       # 18 unit and integration tests (100% passing)
+|   |-- test_heatmap.py        # DefectHeatmap density & overlay tests
+|   `-- test_pipeline.py       # End-to-end pipeline & component unit tests
 `-- weights/                   # Checkpoint storage (.onnx / .pt)
 ```
 

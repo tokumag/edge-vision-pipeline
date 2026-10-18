@@ -7,12 +7,14 @@ from __future__ import annotations
 import time
 import copy
 import yaml
+from io import BytesIO
 from typing import Dict, Any
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+from PIL import Image
 
 from src.core.stream import SyntheticStream
 from src.pipeline import DetectionPipeline
@@ -73,7 +75,7 @@ def sidebar(config: Dict[str, Any]):
 
     page = st.sidebar.radio(
         "Page",
-        ["Inspect", "Benchmark"],
+        ["Inspect Live Stream", "Upload & Inspect", "Benchmark"],
         label_visibility="collapsed",
     )
 
@@ -81,6 +83,7 @@ def sidebar(config: Dict[str, Any]):
     st.sidebar.markdown("##### Detection Settings")
     conf = st.sidebar.slider("Confidence", 0.20, 0.90, 0.45, 0.05, format="%.2f")
     iou = st.sidebar.slider("NMS IoU", 0.20, 0.90, 0.50, 0.05, format="%.2f")
+    show_heatmap = st.sidebar.checkbox("Overlay Defect Heatmap", value=False)
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("##### Pipeline Specs")
@@ -91,18 +94,20 @@ def sidebar(config: Dict[str, Any]):
         language=None,
     )
 
-    return page, conf, iou
+    return page, conf, iou, show_heatmap
 
 
-def page_inspect(config: Dict[str, Any], conf: float, iou: float) -> None:
-    st.markdown("## Live Inspection")
+def page_inspect_stream(
+    config: Dict[str, Any], conf: float, iou: float, show_heatmap: bool
+) -> None:
+    st.markdown("## Live Inspection Stream")
 
     c1, c2, c3 = st.columns([1, 1, 2])
     with c1:
         n_frames = st.number_input("Frames to process", min_value=5, max_value=200, value=30, step=5)
     with c2:
         st.markdown("")
-        run = st.button("Start Inspection", type="primary", use_container_width=True)
+        run = st.button("Start Inspection Loop", type="primary", use_container_width=True)
 
     m1, m2, m3, m4 = st.columns(4)
     slot_fps = m1.empty()
@@ -115,10 +120,9 @@ def page_inspect(config: Dict[str, Any], conf: float, iou: float) -> None:
     slot_chart = right.empty()
 
     if not run:
-        slot_frame.info("Click **Start Inspection** to run the real-time detection pipeline.")
+        slot_frame.info("Click **Start Inspection Loop** to run real-time inference on the streaming buffer.")
         return
 
-    # Build pipeline with active config
     active_config = copy.deepcopy(config)
     active_config["model"]["confidence_threshold"] = conf
     active_config["model"]["iou_threshold"] = iou
@@ -131,14 +135,13 @@ def page_inspect(config: Dict[str, Any], conf: float, iou: float) -> None:
 
     for i in range(int(n_frames)):
         frame = stream.generate_frame()
-        res = pipeline.process_frame(frame)
+        res = pipeline.process_frame(frame, apply_heatmap=show_heatmap)
 
         slot_fps.metric("FPS", f"{res.fps:.0f}")
         slot_lat.metric("Latency", f"{res.latency_ms:.1f} ms")
         slot_det.metric("Detections", len(res.detections))
         slot_trk.metric("Active Tracks", pipeline.tracker.next_track_id - 1)
 
-        # Convert BGR to RGB for rendering
         frame_rgb = res.annotated_frame[:, :, ::-1]
         slot_frame.image(frame_rgb, use_container_width=True)
 
@@ -188,11 +191,65 @@ def page_inspect(config: Dict[str, Any], conf: float, iou: float) -> None:
     r3.metric("Avg Throughput", f"{summary['avg_fps']:.0f} FPS")
     r4.metric("Defect Frame Rate", f"{summary['defect_rate']:.1%}")
 
+    if show_heatmap:
+        hotspots = pipeline.heatmap.get_top_hotspots(k=3)
+        if hotspots:
+            st.markdown("#### Top Recurrent Defect Hotspots")
+            spot_cols = st.columns(len(hotspots))
+            for idx, spot in enumerate(hotspots):
+                spot_cols[idx].metric(
+                    label=f"Hot-Zone #{idx + 1}",
+                    value=f"X:{spot['center'][0]} Y:{spot['center'][1]}",
+                    delta=f"{spot['density']:.0%} Peak Density",
+                )
+
     if defect_log:
         st.markdown("#### Defect Telemetry Log")
         st.dataframe(pd.DataFrame(defect_log), use_container_width=True, hide_index=True)
-    else:
-        st.success("No defects detected across inspected frames.")
+
+
+def page_upload_inspect(
+    config: Dict[str, Any], conf: float, iou: float, show_heatmap: bool
+) -> None:
+    st.markdown("## Upload & Inspect Media")
+    st.caption("Upload an image to run single-shot edge detection and defect hotspot analysis.")
+
+    uploaded_file = st.file_uploader(
+        "Choose an image file", type=["jpg", "jpeg", "png"]
+    )
+
+    if uploaded_file is not None:
+        image = Image.open(uploaded_file).convert("RGB")
+        img_np = np.array(image)
+        # Convert RGB to BGR for pipeline
+        frame_bgr = img_np[:, :, ::-1]
+
+        active_config = copy.deepcopy(config)
+        active_config["model"]["confidence_threshold"] = conf
+        active_config["model"]["iou_threshold"] = iou
+
+        pipeline = DetectionPipeline(config=active_config, force_mock=True)
+        res = pipeline.process_frame(frame_bgr, apply_heatmap=show_heatmap)
+
+        col_left, col_right = st.columns([1, 1])
+        with col_left:
+            st.image(image, caption="Original Input", use_container_width=True)
+        with col_right:
+            annotated_rgb = res.annotated_frame[:, :, ::-1]
+            st.image(annotated_rgb, caption=f"Detection Result ({res.latency_ms:.1f} ms)", use_container_width=True)
+
+        st.markdown("---")
+        st.markdown(f"**Found {len(res.detections)} objects** (Inference Latency: `{res.latency_ms:.1f} ms`)")
+
+        if res.detections:
+            rows = []
+            for d in res.detections:
+                rows.append({
+                    "Class": d["class_name"].replace("_", " ").title(),
+                    "Confidence": f"{d['confidence']:.1%}",
+                    "Bounding Box [x1, y1, x2, y2]": str(d["bbox"]),
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def page_benchmark(config: Dict[str, Any]) -> None:
@@ -271,10 +328,12 @@ def page_benchmark(config: Dict[str, Any]) -> None:
 
 def main() -> None:
     config = load_config()
-    page, conf, iou = sidebar(config)
+    page, conf, iou, show_heatmap = sidebar(config)
 
-    if page == "Inspect":
-        page_inspect(config, conf, iou)
+    if page == "Inspect Live Stream":
+        page_inspect_stream(config, conf, iou, show_heatmap)
+    elif page == "Upload & Inspect":
+        page_upload_inspect(config, conf, iou, show_heatmap)
     else:
         page_benchmark(config)
 
